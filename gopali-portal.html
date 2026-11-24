@@ -3,7 +3,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta id="recordEndpoint" content="">
-<title>Village Plot Search</title>
+<title>Gopali Plot Search</title>
 <style>
   * { box-sizing: border-box }
   body { margin: auto; max-width: 1000px; padding: 1rem; background: #f4f7f4;
@@ -36,39 +36,55 @@
   #find:disabled { opacity: .55 }
   #preview { position: relative; margin: .8rem 0 }
   #mapView { display: block; width: 100%; aspect-ratio: 2/1; background: #fafafa }
+  main { max-width: 46rem; margin: auto }
+  .place { margin: 0 0 .8rem }
+  .search-row { display: flex; align-items: end; flex-wrap: wrap; gap: .6rem }
+  .search-row label { display: grid; gap: .2rem; flex: 1 1 8rem; min-width: 0; margin: 0 }
+  .search-row input { width: 100%; min-width: 0 }
+  .search-row input, .search-row button, #gps { min-height: 44px }
+  #status:empty, #accuracy:empty { display: none }
+  summary { cursor: pointer; padding: .5rem 0; font-weight: 600 }
 </style>
 <main>
-  <h1>Village Plot Search</h1>
-  <p>Find the gata/khasra number where you are standing in Gopali. For the clearest result, stand inside the field, away from shared edges.</p>
+  <h1>Gopali Plot Search</h1>
+  <p class="place">Village: Gopali · Tehsil: Deoband · District: Saharanpur</p>
   <section>
-    <h2>Use my phone's location</h2>
-    <button type="button" id="gps" aria-controls="gpsFix status">Find my plot with live GPS</button>
-    <p>Allow location and keep this page open. Your latitude and longitude update with each new device reading. The GPS-to-plot lookup runs on your device.</p>
-    <div id="onlineRecordControls" hidden>
-      <label><input id="autoRecords" type="checkbox"> Fetch live land details automatically when the matched gata changes</label>
-      <form id="recordSearch"><label>Or enter a gata / khasra number <input id="gataQuery" type="text" placeholder="e.g. 373" maxlength="48" required></label>
-        <button type="submit">Find live land record</button></form>
-      <p>Online land records send only the Gopali village identifier and gata number to UP BhuNaksha, not your GPS coordinates. Uncheck automatic fetching to keep GPS lookup fully offline.</p>
-    </div>
-    <p id="recordSetup">Offline copy. For live land records, run <code>node geoData/gopali-record-server.cjs</code> from the project root and open the address it prints.</p>
-    <p id="gpsFix" hidden></p>
-    <p id="gpsHint" role="status" hidden></p>
-    <p id="status" role="status">Ready for offline lookup in Gopali (110216). No upload required.</p>
+    <button type="button" id="gps" aria-controls="accuracy gpsFix status">Find my plot with live GPS</button>
+    <p id="accuracy"></p>
+    <p id="recordSetup">Offline mode: land records unavailable.</p>
+    <form id="coordinateSearch">
+      <fieldset id="manualEntry"><legend>Search by coordinates</legend>
+        <div class="search-row">
+          <label>Latitude <input id="lat" type="number" step="any" min="-90" max="90" required></label>
+          <label>Longitude <input id="lon" type="number" step="any" min="-180" max="180" required></label>
+          <button id="offline" type="submit">Find plot</button>
+        </div>
+      </fieldset>
+    </form>
+    <p id="status" role="status"></p>
     <section id="landRecord" aria-labelledby="recordHeading" hidden>
-      <h2 id="recordHeading">Land record: gata / khasra <span id="recordGata"></span></h2>
-      <p>District: <strong>Saharanpur (132)</strong> · Tehsil: <strong>Deoband (00704)</strong> · Village: <strong>Gopali (110216)</strong></p>
+      <h2 id="recordHeading">Gata / khasra <span id="recordGata"></span></h2>
       <p id="rorStatus" aria-live="polite"></p>
       <button type="button" id="retryRecord" hidden>Retry this gata</button>
       <div id="rorTables" class="record-tables" hidden>
-        <table><caption>Live plot record — UP BhuNaksha (ROR)</caption>
+        <table><caption>Land details · UP BhuNaksha</caption>
           <thead><tr><th scope="col">Khata number</th><th scope="col">Gata number</th><th scope="col">Recorded area (ha)</th></tr></thead>
           <tbody id="rorLandRows"></tbody></table>
         <table><caption>Recorded holders of each khata</caption>
           <thead><tr><th scope="col">Khata number</th><th scope="col">Recorded holder (खातेदार)</th><th scope="col">Share</th></tr></thead>
           <tbody id="rorHolderRows"></tbody></table>
-        <p>The area above is recorded against the gata, not each person. This source does not give individual shares, holder areas or land revenue due.</p>
       </div>
-      <p id="recordMissing" hidden>No separate UP Bhulekh Khatauni extract is saved for this gata.</p>
+      <section id="iprPanel" hidden>
+        <h2>Dated Khatauni — India Property Register</h2>
+        <div class="record-tables">
+          <table><caption>UP Khatauni entries for this gata as read by India Property Register</caption>
+            <thead><tr><th>Khata</th><th>Area in the record</th><th>Land class</th><th>Source</th><th>Record date</th><th>Read on</th></tr></thead>
+            <tbody id="iprLandRows"></tbody></table>
+          <table><caption>Current holders listed for this plot by India Property Register</caption>
+            <thead><tr><th>Recorded holder or entry</th><th>Share as published</th><th>Holder area as published</th></tr></thead>
+            <tbody id="iprHolderRows"></tbody></table>
+        </div>
+      </section>
       <div id="recordTables" class="record-tables" hidden>
         <table><caption>Saved Khatauni extract — land and account details</caption><tbody id="landRows"></tbody></table>
         <table><caption>Recorded holders and shares (खातेदार का अंश)</caption>
@@ -79,7 +95,20 @@
         <p id="recordSource"></p>
       </div>
     </section>
-    <details id="recordAttachment" hidden><summary>Optional: compare a local PDF copy</summary>
+    <figure id="preview" hidden>
+      <svg id="mapView" role="img" aria-label="GPS position on the georeferenced Gopali map">
+        <image id="mapRaster" href="gopali-registered-preview.png" width="13120" height="9960"/>
+        <path id="plotOutline" fill="#16813c" fill-rule="evenodd" fill-opacity=".2" stroke="#116333" stroke-width="2" vector-effect="non-scaling-stroke"/>
+        <circle id="mapPin" r="8" fill="#165ac2" stroke="white" stroke-width="2"/>
+      </svg>
+      <figcaption id="mapLegend">Blue: location · Green: draft plot boundary</figcaption>
+    </figure>
+    <details id="moreOptions"><summary>More options</summary>
+    <p id="gpsFix" hidden></p>
+    <p id="gpsHint" role="status" hidden></p>
+    <label id="autoRecordOption" hidden><input id="autoRecords" type="checkbox"> Fetch land records automatically (village and gata only)</label>
+    <p id="recordMissing" hidden>No separate Khatauni extract saved for this gata.</p>
+    <details id="recordAttachment" hidden><summary>Compare a local PDF</summary>
       <label for="recordFile"><strong>View a downloaded record (PDF)</strong></label>
       <input type="file" id="recordFile" accept="application/pdf,.pdf" aria-describedby="recordHelp">
       <p id="recordHelp">Download or print the official result to PDF, then choose it here. Check the village, gata and year in the document.
@@ -93,22 +122,11 @@
         <button id="forgetRecord" type="button">Remove this copy</button>
       </div>
     </details>
-    <figure id="preview" hidden>
-      <svg id="mapView" role="img" aria-label="GPS position on the georeferenced Gopali map">
-        <image id="mapRaster" href="gopali-registered-preview.png" width="13120" height="9960"/>
-        <path id="plotOutline" fill="#16813c" fill-rule="evenodd" fill-opacity=".2" stroke="#116333" stroke-width="2" vector-effect="non-scaling-stroke"/>
-        <circle id="mapPin" r="8" fill="#165ac2" stroke="white" stroke-width="2"/>
-      </svg>
-      <figcaption id="mapLegend">Blue dot: GPS position. Green outline, when shown: matching draft plot.</figcaption>
-    </figure>
     <details><summary>Optional: upload your own village map for offline search</summary>
     <input id="file" aria-label="Village map" type="file" accept=".geojson,.json,image/png,image/jpeg,image/webp">
     <p>Upload numbered Gopali parcel polygons for boundary-aware lookup. A screenshot or live point result alone cannot confirm a parcel edge.</p>
     </details>
-    <fieldset id="manualEntry"><legend>Or enter coordinates manually</legend>
-    <label>Latitude <input id="lat" type="number" step="any" placeholder="Latitude"></label>
-    <label>Longitude <input id="lon" type="number" step="any" placeholder="Longitude"></label>
-    <button id="offline">Find on Gopali map (offline)</button>
+    <fieldset id="manualTools"><legend>Other coordinate lookups</legend>
     <button id="live">Search live Gopali map</button>
     <button id="find" disabled>Search uploaded map</button>
     </fieldset>
@@ -131,6 +149,7 @@
       <button id="reset" disabled>Reset landmarks</button><span id="count"></span>
     </details>
     <div id="sheet" hidden><img id="image" alt="Numbered cadastral map for landmark matching"></div>
+    </details>
   </section>
 </main>
 <script src="gopali-live-parcels.js"></script>
@@ -179,19 +198,22 @@
   }
   const recordEndpoint=el("recordEndpoint").content;
   el("autoRecords").checked=!!recordEndpoint;
-  el("onlineRecordControls").hidden=!recordEndpoint; el("recordSetup").hidden=!!recordEndpoint;
+  el("autoRecordOption").hidden=!recordEndpoint;
+  el("recordSetup").hidden=!!recordEndpoint;
   let rorRequest=null;
   function clearLiveRecord() {
     rorRequest?.abort(); rorRequest=null;
     el("rorTables").hidden=true; el("retryRecord").hidden=true; el("rorStatus").textContent="";
     setRecordRows("rorLandRows",[]); setRecordRows("rorHolderRows",[]);
+    el("iprPanel").hidden=true;
+    setRecordRows("iprLandRows",[]); setRecordRows("iprHolderRows",[]);
   }
   async function fetchLiveRecord(number) {
     if (!recordEndpoint || number===null || recordPlot!==number) return;
     clearLiveRecord();
     const request=new AbortController();
     rorRequest=request;
-    const timeout=setTimeout(()=>request.abort(),12000);
+    const timeout=setTimeout(()=>request.abort(),30000);
     el("rorStatus").textContent=`Fetching the public record for gata ${number}…`;
     try {
       const response=await fetch(recordEndpoint,{
@@ -203,8 +225,23 @@
       if (rorRequest!==request) return;
       if (request.signal.aborted) throw Error("Request timed out.");
       if (!response.ok) throw Error(result?.error || `Record server returned HTTP ${response.status}.`);
+      if (result?.villageCode!=="110216" || result.plotNo!==number) throw Error("Record did not match this village and gata.");
+      const fetchedAt=response.headers.get("X-Record-Fetched-At");
+      const when=fetchedAt ? `, retrieved ${new Date(fetchedAt).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})} IST` : "";
+      const cached=response.headers.get("X-Record-Cache")==="hit";
+      if (result.provider==="ipr") {
+        if (!Array.isArray(result.records) || !result.records.length || !Array.isArray(result.holders))
+          throw Error("Unreadable IPR record.");
+        const field=v=>v ?? "Not provided by IPR";
+        setRecordRows("iprLandRows",result.records.map(r=>[r.khata,r.area,r.landClass,r.source,r.recordDate,r.readOn].map(field)));
+        setRecordRows("iprHolderRows",result.holders.length ? result.holders.map(h=>[h.name,h.share,h.area].map(field)) :
+          [["No current holder supplied","Not provided by IPR","Not provided by IPR"]]);
+        el("iprPanel").hidden=false;
+        el("rorStatus").textContent=`${cached ? "Today's cached IPR record" : "IPR fallback record"} for gata ${number}${when}. Not a certified Khatauni.`;
+        return;
+      }
       const accounts=result?.accounts;
-      if (result?.villageCode!=="110216" || result.plotNo!==number || !Array.isArray(accounts) || !accounts.length ||
+      if (!Array.isArray(accounts) || !accounts.length ||
           !accounts.every(a=>a && typeof a.khata==="string" && typeof a.areaHa==="string" &&
             Array.isArray(a.holders) && a.holders.every(h=>typeof h==="string")))
         throw Error("Record did not match this village and gata or was unreadable.");
@@ -212,7 +249,8 @@
       setRecordRows("rorHolderRows",accounts.flatMap(a=>(a.holders.length ? a.holders : ["No holder listed in response"])
         .map(name=>[a.khata,name,"Not provided by this source"])));
       el("rorTables").hidden=false;
-      el("rorStatus").textContent=`Live public record for gata ${number}, retrieved ${new Date().toLocaleString()}. Not a certified Khatauni.`;
+      const label=cached ? "Today's cached public record" : "Public record";
+      el("rorStatus").textContent=`${label} for gata ${number}${when}. Not a certified Khatauni.`;
     } catch (err) {
       if (rorRequest===request) {
         el("rorStatus").textContent=`Live record unavailable for gata ${number}: ${request.signal.aborted ? "Request timed out." : err.message}`;
@@ -253,14 +291,6 @@
   el("autoRecords").onchange=()=>{
     if (el("autoRecords").checked && recordPlot!==null) fetchLiveRecord(recordPlot);
     else { clearLiveRecord(); el("rorStatus").textContent="Automatic live fetching is off."; }
-  };
-  el("recordSearch").onsubmit=event=>{
-    event.preventDefault();
-    const number=el("gataQuery").value.trim();
-    startLookup();
-    if (!number) { say("Enter a gata / khasra number."); return; }
-    say(`Land-record lookup by number: ${number}. No GPS or parcel boundary was checked.`,number);
-    if (!el("autoRecords").checked) fetchLiveRecord(number);
   };
   function pauseForRecord() {
     if (gpsSession && recordPlot!==null) {
@@ -561,7 +591,7 @@
     say(registered.length ? "Plot unclear: no reliably numbered boundary here. Try live search." :
       "Plot unclear: selected lookup layer is unavailable. Check the dataset files or return to the active lookup.");
   }
-  el("offline").onclick=()=>{ startLookup(); const p=coordinates(); if(p) offlineLookup(p); };
+  el("coordinateSearch").onsubmit=event=>{ event.preventDefault(); startLookup(); const p=coordinates(); if(p) offlineLookup(p); };
   // WGS84 to the viewer's fixed UTM zone 44N, including Gopali west of 78E.
   function projectGopali(lat, lon) {
     const rad=Math.PI/180, p=lat*rad, f=1/298.257223563, e=f*(2-f), ep=e/(1-e);
@@ -618,6 +648,7 @@
     clearTimeout(gpsSession.timer);
     hidePin();
     el("gpsFix").hidden=true; el("gpsFix").textContent="";
+    el("accuracy").textContent="";
     el("lat").value=el("lon").value="";
   }
   function stopGps(message) {
@@ -628,7 +659,7 @@
     gpsSession=null;
     if (session.id!==null) navigator.geolocation.clearWatch(session.id);
     el("gps").textContent=gpsLabel;
-    el("manualEntry").disabled=false;
+    el("manualEntry").disabled=el("manualTools").disabled=false;
     // A manual lookup must never silently reuse a device fix without its accuracy.
     el("lat").value=session.manualLat; el("lon").value=session.manualLon;
     if (message) say(message);
@@ -644,7 +675,7 @@
     const geo=navigator.geolocation, options={enableHighAccuracy:true,maximumAge:0,timeout:12000};
     gpsSession=session;
     clearGpsFix();
-    el("manualEntry").disabled=true;
+    el("manualEntry").disabled=el("manualTools").disabled=true;
     el("gps").textContent="Stop live GPS";
     say("Waiting for your location. Allow precise location if your phone asks.");
     function armRefresh() {
@@ -694,6 +725,7 @@
       el("lat").value=lat; el("lon").value=lon;
       el("gpsFix").textContent=`Latitude ${lat.toFixed(7)}, longitude ${lon.toFixed(7)} | Accuracy: about ${Math.ceil(accuracy)} m | Device reading: ${new Date(timestamp).toLocaleTimeString()} | Coordinates since: ${new Date(session.since).toLocaleTimeString()}`;
       el("gpsFix").hidden=false;
+      el("accuracy").textContent=`GPS accuracy: about ${Math.ceil(accuracy)} m`;
       if (points.length===3 && !parcels.length) locate({lat,lon},accuracy);
       else offlineLookup({lat,lon},accuracy);
       session.timer=setTimeout(()=>{

@@ -1,6 +1,7 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const {createDailyLookup} = require("./gopali-record-cache.cjs");
 
 const service = "https://upbhunaksha.gov.in/bhunakshaserver/MapInfo/getPlotInfo";
 const meta = '<meta id="recordEndpoint" content="">';
@@ -68,8 +69,68 @@ async function getRecord(plotNo,signal,fetchPlot) {
   }
 }
 
-function createPortalServer(fetchPlot=fetch) {
-  let starts=[], active=0;
+async function getIprRecord(plotNo,signal,fetchPlot,key) {
+  const malformed=()=>new RecordError(502,"India Property Register returned an unreadable or mismatched record.");
+  async function get(resource) {
+    try {
+      signal.throwIfAborted();
+      const r=await fetchPlot(`https://indiapropertyregister.com/api/v1/${resource}`,{
+        method:"GET",headers:{Accept:"application/json",Authorization:`Bearer ${key}`},redirect:"error",signal
+      });
+      if (!r.ok) {
+        await r.body?.cancel();
+        const errors={401:"The site's IPR key was not accepted.",403:"IPR did not permit this request.",
+          402:"The site's IPR wallet has insufficient credit.",404:"No IPR record found.",429:"IPR's call limit has been reached."};
+        throw new RecordError([402,404,429].includes(r.status) ? r.status : 503,errors[r.status] || `IPR returned HTTP ${r.status}.`);
+      }
+      if (!r.headers.get("content-type")?.includes("application/json")) { await r.body?.cancel(); throw malformed(); }
+      const raw=await readText(r.body,1024*1024,new RecordError(502,"The IPR record exceeds the display limit."));
+      try { return JSON.parse(raw); } catch { throw malformed(); }
+    } catch (err) {
+      if (signal.aborted) throw new RecordError(504,"The IPR lookup timed out or was cancelled.");
+      if (err instanceof RecordError) throw err;
+      throw new RecordError(503,"India Property Register could not be reached.");
+    }
+  }
+  const found=await get(`village/110216/plots?${new URLSearchParams({plot:plotNo})}`);
+  if (String(found?.village?.lgd)!=="110216" || !Array.isArray(found.matches)) throw malformed();
+  const exact=found.matches.filter(m=>m?.plot_no===plotNo);
+  if (!exact.length) throw new RecordError(404,"No exact IPR match for this Gopali gata. Related subdivisions were not substituted.");
+  if (exact.length!==1 || !/^P[0-9a-f]{16}$/i.test(exact[0].ipr_id)) throw malformed();
+  const id=exact[0].ipr_id, plot=await get(`plot/${id}`);
+  if (plot?.ipr_id!==id || plot.plot_no!==plotNo || String(plot.village?.lgd)!=="110216" ||
+      !Array.isArray(plot.land_records) || (plot.holders!=null && !Array.isArray(plot.holders))) throw malformed();
+  const text=v=>typeof v==="string" && v.trim() ? v.trim() : null;
+  const area=a=>text(a?.as_printed) ?? ((Number.isFinite(a?.value) || text(a?.value)) && text(a?.unit) ? `${a.value} ${a.unit}` : null);
+  const records=plot.land_records.filter(r=>r?.record_system==="up_khatauni").map(r=>({
+    khata:text(r.khata_no),area:area(r.area),landClass:text(r.land_class),source:text(r.source?.name),
+    recordDate:text(r.record_date),readOn:text(r.read_on)
+  }));
+  if (!records.length) throw new RecordError(404,"IPR has a plot entry but no dated UP Khatauni record for this gata.");
+  const holders=(plot.holders ?? []).filter(h=>h && !h.until).map(h=>({
+    name:text(h.name),share:text(h.share),area:area(h.area)
+  }));
+  return {provider:"ipr",villageCode:"110216",plotNo,records,holders};
+}
+
+function createPortalServer(fetchPlot=fetch,iprKey=process.env.IPR_API_KEY?.trim(),clock=Date.now) {
+  let starts=[], iprStarts=[], active=0;
+  const lookup=createDailyLookup(clock), paidAttempts=createDailyLookup(clock);
+  async function fallback(plotNo) {
+    const {data}=await paidAttempts(plotNo,async ()=>{
+      const now=clock();
+      iprStarts=iprStarts.filter(t=>now-t<3600000);
+      if (iprStarts.length>=5) throw new RecordError(429,"BhuNaksha unavailable; the demo's hourly IPR allowance is used up.");
+      iprStarts.push(now);
+      try { return {record:await getIprRecord(plotNo,AbortSignal.timeout(16000),fetchPlot,iprKey)}; }
+      catch (err) {
+        // Even a failed detail read may follow a billed plot-ID search. Reserve the attempt for today.
+        return {error:err instanceof RecordError ? err : new RecordError(502,"Unreadable India Property Register response.")};
+      }
+    });
+    if (data.error) throw new RecordError(data.error.status,`BhuNaksha unavailable. ${data.error.message} IPR will not be retried for this gata until tomorrow (IST).`);
+    return data.record;
+  }
   return http.createServer(async (req,res)=>{
     const route=req.url.split("?")[0];
     res.setHeader("X-Content-Type-Options","nosniff");
@@ -86,26 +147,31 @@ function createPortalServer(fetchPlot=fetch) {
         const plotNo=input?.plotNo;
         if (typeof plotNo!=="string" || plotNo!==plotNo.trim() || !/^\p{Nd}[\p{Nd}\p{L}\p{M} ./()-]{0,47}$/u.test(plotNo) ||
             Object.keys(input).length!==1) throw new RecordError(400,"Supply only one gata number, for example 373 or 0012/क.");
-        const now=Date.now();
-        starts=starts.filter(t=>now-t<60000);
-        if (starts.length>=30 || active>=4) throw new RecordError(429,"Too many record requests. Please retry later.");
-        starts.push(now); active++;
-        const request=new AbortController(), abort=()=>request.abort();
-        const timer=setTimeout(abort,10000);
-        res.once("close",abort);
-        try {
-          const data=await getRecord(plotNo,request.signal,fetchPlot);
-          if (!res.destroyed) res.writeHead(200,{"Content-Type":"application/json; charset=utf-8"}).end(JSON.stringify(data));
-        } finally {
-          clearTimeout(timer); res.off("close",abort); active--;
+        async function load() {
+          const now=clock();
+          starts=starts.filter(t=>now-t<60000);
+          if (starts.length>=30 || active>=4) throw new RecordError(429,"Too many record requests. Please retry later.");
+          starts.push(now); active++;
+          try {
+            return await getRecord(plotNo,AbortSignal.timeout(10000),fetchPlot);
+          } catch (err) {
+            if (!iprKey || !(err instanceof RecordError)) throw err;
+            return await fallback(plotNo);
+          } finally { active--; }
         }
+        const result=await lookup(plotNo,load);
+        if (res.destroyed) return;
+        res.setHeader("X-Record-Cache",result.cache);
+        res.setHeader("X-Record-Fetched-At",result.fetchedAt);
+        res.writeHead(200,{"Content-Type":"application/json; charset=utf-8"}).end(JSON.stringify(result.data));
         return;
       }
       if (!["GET","HEAD"].includes(req.method)) { res.setHeader("Allow","GET, HEAD"); throw new RecordError(405,"Use GET or HEAD."); }
       if (route==="/" || route==="/gopali-portal.html") {
         const html=await fs.promises.readFile(path.join(__dirname,"gopali-portal.html"),"utf8");
         res.writeHead(200,{"Content-Type":"text/html; charset=utf-8"});
-        res.end(req.method==="HEAD" ? undefined : html.replace(meta,`<meta id="recordEndpoint" content=".${apiPath}">`));
+        const page=html.replace(meta,`<meta id="recordEndpoint" content=".${apiPath}">`);
+        res.end(req.method==="HEAD" ? undefined : page);
         return;
       }
       const name=route.slice(1);
