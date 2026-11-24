@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: gopali-plot-search
+    runtime: node
+    plan: free
+    buildCommand: node --check gopali-record-server.cjs
+    startCommand: node gopali-record-server.cjs
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "24.x"

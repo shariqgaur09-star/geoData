@@ -1,0 +1,1 @@
+globalThis.gopaliMonthly=null;
