@@ -52,6 +52,7 @@
     </div>
     <p id="recordSetup">Offline copy. For live land records, run <code>node geoData/gopali-record-server.cjs</code> from the project root and open the address it prints.</p>
     <p id="gpsFix" hidden></p>
+    <p id="gpsHint" role="status" hidden></p>
     <p id="status" role="status">Ready for offline lookup in Gopali (110216). No upload required.</p>
     <section id="landRecord" aria-labelledby="recordHeading" hidden>
       <h2 id="recordHeading">Land record: gata / khasra <span id="recordGata"></span></h2>
@@ -609,7 +610,10 @@
     } finally { el("live").disabled=false; }
   };
   el("find").onclick = () => { startLookup(); const p = coordinates(); if (p) locate(p); };
-  const gpsLabel = el("gps").textContent, freshForMs = 60000;
+  const gpsLabel = el("gps").textContent, freshForMs = 60000, refreshAfterMs = 15000;
+  function gpsHint(message) {
+    el("gpsHint").textContent=message; el("gpsHint").hidden=!message;
+  }
   function clearGpsFix() {
     clearTimeout(gpsSession.timer);
     hidePin();
@@ -620,6 +624,7 @@
     const session=gpsSession;
     if (!session) return;
     clearGpsFix();
+    clearTimeout(session.refreshTimer); gpsHint("");
     gpsSession=null;
     if (session.id!==null) navigator.geolocation.clearWatch(session.id);
     el("gps").textContent=gpsLabel;
@@ -634,14 +639,42 @@
     if (!globalThis.isSecureContext || !navigator.geolocation?.watchPosition) {
       say("Live GPS needs a supported browser on HTTPS (or localhost on this device). You can still enter coordinates manually."); return;
     }
-    const session={id:null, timer:null, lastTime:0, manualLat:el("lat").value, manualLon:el("lon").value};
+    const session={id:null, timer:null, refreshTimer:null, refreshing:false, point:null, since:0,
+      lastTime:0, manualLat:el("lat").value, manualLon:el("lon").value};
+    const geo=navigator.geolocation, options={enableHighAccuracy:true,maximumAge:0,timeout:12000};
     gpsSession=session;
     clearGpsFix();
     el("manualEntry").disabled=true;
     el("gps").textContent="Stop live GPS";
     say("Waiting for your location. Allow precise location if your phone asks.");
+    function armRefresh() {
+      if (gpsSession!==session || document.hidden || session.refreshing || !geo.getCurrentPosition) return;
+      clearTimeout(session.refreshTimer);
+      session.refreshTimer=setTimeout(requestFresh,refreshAfterMs);
+    }
+    function requestFresh() {
+      if (gpsSession!==session || document.hidden || session.refreshing) return;
+      session.refreshTimer=null; session.refreshing=true;
+      const before=session.point, beforeTime=session.lastTime;
+      gpsHint("No change in the reported position yet. Asking the phone for a fresh fix…");
+      function finish(position,err) {
+        if (gpsSession!==session || document.hidden) return;
+        if (err?.code===1) { failed(err); return; }
+        if (position && (session.lastTime===beforeTime || position.timestamp>session.lastTime)) update(position);
+        if (session.point===before) {
+          gpsHint(err ? "The fresh fix was unavailable. Live GPS is still listening." :
+            "The phone has not reported different coordinates. If you’re walking, check Chrome’s precise location permission and try outdoors.");
+        }
+        session.refreshing=false; armRefresh();
+      }
+      try { geo.getCurrentPosition(p=>finish(p,null),err=>finish(null,err),options); }
+      catch (err) {
+        if (!(err instanceof DOMException)) throw err;
+        finish(null,{code:err.name==="SecurityError" ? 1 : 2});
+      }
+    }
     function update({coords,timestamp}) {
-      if (gpsSession!==session || timestamp<session.lastTime) return;
+      if (gpsSession!==session || document.hidden || timestamp<session.lastTime) return;
       clearGpsFix();
       const age=Date.now()-timestamp;
       if (!Number.isFinite(timestamp) || age<0 || age>=freshForMs) {
@@ -653,8 +686,13 @@
           !Number.isFinite(accuracy) || accuracy<=0) {
         say("Plot unclear: no usable location and accuracy yet. Enable precise location on your device."); return;
       }
+      const point=`${lat.toFixed(7)}, ${lon.toFixed(7)}`;
+      // Repeated readings can have fresh timestamps. Only a change in the displayed point postpones the refresh.
+      if (point!==session.point) {
+        session.point=point; session.since=timestamp; gpsHint(""); armRefresh();
+      }
       el("lat").value=lat; el("lon").value=lon;
-      el("gpsFix").textContent=`Latitude ${lat.toFixed(7)}, longitude ${lon.toFixed(7)} | Accuracy: about ${Math.ceil(accuracy)} m | Updated ${new Date(timestamp).toLocaleTimeString()}`;
+      el("gpsFix").textContent=`Latitude ${lat.toFixed(7)}, longitude ${lon.toFixed(7)} | Accuracy: about ${Math.ceil(accuracy)} m | Device reading: ${new Date(timestamp).toLocaleTimeString()} | Coordinates since: ${new Date(session.since).toLocaleTimeString()}`;
       el("gpsFix").hidden=false;
       if (points.length===3 && !parcels.length) locate({lat,lon},accuracy);
       else offlineLookup({lat,lon},accuracy);
@@ -676,7 +714,7 @@
       stopGps(`${reason} You can also enter coordinates manually.`);
     }
     try {
-      session.id=navigator.geolocation.watchPosition(update,failed,{enableHighAccuracy:true,maximumAge:0,timeout:30000});
+      session.id=geo.watchPosition(update,failed,{...options,timeout:30000});
     } catch (err) {
       stopGps(`Cannot start device location (${err.name}). Check browser permissions or enter coordinates manually.`);
       if (!(err instanceof DOMException)) throw err;
