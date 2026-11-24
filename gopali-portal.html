@@ -42,15 +42,15 @@
   .search-row label { display: grid; gap: .2rem; flex: 1 1 8rem; min-width: 0; margin: 0 }
   .search-row input { width: 100%; min-width: 0 }
   .search-row input, .search-row button, #gps { min-height: 44px }
-  #status:empty, #accuracy:empty { display: none }
+  #status:empty { display: none }
   summary { cursor: pointer; padding: .5rem 0; font-weight: 600 }
 </style>
 <main>
   <h1>Gopali Plot Search</h1>
   <p class="place">Village: Gopali · Tehsil: Deoband · District: Saharanpur</p>
   <section>
-    <button type="button" id="gps" aria-controls="accuracy gpsFix status">Find my plot with live GPS</button>
-    <p id="accuracy"></p>
+    <button type="button" id="gps" aria-controls="gpsFix status">Find my plot with live GPS</button>
+    <p id="gpsFix" hidden></p>
     <p id="recordSetup">Offline mode: land records unavailable.</p>
     <form id="coordinateSearch">
       <fieldset id="manualEntry"><legend>Search by coordinates</legend>
@@ -104,7 +104,6 @@
       <figcaption id="mapLegend">Blue: location · Green: draft plot boundary</figcaption>
     </figure>
     <details id="moreOptions"><summary>More options</summary>
-    <p id="gpsFix" hidden></p>
     <p id="gpsHint" role="status" hidden></p>
     <label id="autoRecordOption" hidden><input id="autoRecords" type="checkbox"> Fetch land records automatically (village and gata only)</label>
     <p id="recordMissing" hidden>No separate Khatauni extract saved for this gata.</p>
@@ -129,11 +128,21 @@
     <fieldset id="manualTools"><legend>Other coordinate lookups</legend>
     <button id="live">Search live Gopali map</button>
     <button id="find" disabled>Search uploaded map</button>
+    <!-- workspace-only -->
+    <details><summary>Earlier screenshot pilot</summary><span id="trace-count"></span> lower-resolution drafts.
+      <button id="legacy">Compare earlier screenshot estimate</button></details>
+    <!-- /workspace-only -->
     </fieldset>
     <p><strong id="datasetLabel">Bundled map snapshot</strong>: <span id="live-count"></span> numbered boundaries of <span id="expectedCount">1,627</span> expected.
       <a id="draftMap" download="gopali-parcels.geojson">Download this lookup layer (GPS arrays)</a>.
       Map results are not survey verification.
+      <!-- workspace-only -->
+      <a href="gopali-2026-11-24-gis.zip" download>Original 24 Nov GIS package</a>.
+      <!-- /workspace-only -->
       <a id="exportMap" download="gopali-verified.geojson">Download village outline and checked point separately</a>.</p>
+    <!-- workspace-only -->
+    <p><a id="switchDataset" hidden></a> <a href="gopali-refresh-report.json">Latest refresh report</a></p>
+    <!-- /workspace-only -->
     <p>Offline search uses the bundled boundaries unless you upload your own. Live search sends the entered point to UP BhuNaksha.</p>
     <p id="manual" hidden><a href="https://upbhunaksha.gov.in/home" target="_blank" rel="noopener noreferrer">Open official BhuNaksha viewer</a>.
       Select Saharanpur → Deoband → Gopali (110216). Zoom in and compare the cursor
@@ -154,6 +163,20 @@
 </main>
 <script src="gopali-live-parcels.js"></script>
 <script src="gopali-current.js"></script>
+<!-- workspace-only -->
+<script src="gopali-sheet-candidates.js"></script>
+<script src="gopali-preview.js"></script>
+<script type="application/json" id="khatauni-data">
+{"110216":{"1280":{
+  "khata_no":"00813","gata_unique_code":"1102161280000063","total_area_ha":"0.007000",
+  "land_class":"6-3 — कब्रिस्तान और श्मशान (मरघट), excluding those on a recorded holder’s land or in a settlement area.",
+  "agricultural_year":"01 July 2026 to 30 June 2027 (1429–1434 as printed)",
+  "rights_basis":null,"rights_start_year":null,
+  "holders":[{"name":"कब्रिस्तान","share":"1/1","area_ha":"0.007000","revenue_due_rs":"0.00"}],
+  "holder_area_total_ha":"0.007000","extract_time":"24 November 2026, 03:22:05 AM"
+}}}
+</script>
+<!-- /workspace-only -->
 <script type="application/json" id="verified-data">
 {"type":"FeatureCollection","features":[
 {"type":"Feature","properties":{"kind":"village_outline","village_code":"110216","name":"Gopali","source":"https://www.gisconvert.org/boundary-data/uttar-pradesh/00704"},"geometry":{"type":"Polygon","coordinates":[[
@@ -520,6 +543,25 @@
   }
   // Pixel rings in the bundled 1061x768 sheet, digitised from the zoomed linework.
   let reviewMode=false;
+  // workspace-only
+  const sheetParcels=[
+    ["1244",[[179.5,343],[186.5,334.5],[210,308],[236.5,331.5],[221,352.5],[207.5,368],[179.5,343]]],
+    ["1248",[[124.5,336],[143.5,311.5],[179.5,343],[207.5,368],[189,391],[170,375],[148,354],[124.5,336]]],
+    ["100",[[342,95],[353,81],[371,97],[359,110],[342,95]]],
+    ["99",[[359,110],[371,97],[407,130],[396,143],[359,110]]],
+    ["101",[[345,126],[359,110],[396,143],[383,158],[345,126]]],
+    ["3",[[311,90],[318,77],[342,95],[359,110],[345,126],[332,116],[335,112],[311,90]]],
+    ["2",[[318,76],[318,66],[326,61],[340,76],[347,75],[353,81],[342,95],[318,76]]],
+    ["7",[[347,75],[354,73],[376,86],[384,78],[387,78],[401,93],[388,109],[347,75]]]
+  ];
+  if(typeof gopaliSheetCandidates!=="undefined"){
+    sheetParcels.push(...gopaliSheetCandidates.filter(([number])=>number!==null));
+    el("trace-count").textContent=sheetParcels.length;
+  } else {
+    el("trace-count").textContent=`${sheetParcels.length} (additional sheet data not loaded)`;
+  }
+  reviewMode=new URLSearchParams(location.search).get("review")==="1";
+  // /workspace-only
   const snapshot=reviewMode ? globalThis.gopaliPreview : globalThis.gopaliMonthly;
   const pilot=!reviewMode && snapshot===null && typeof gopaliLiveParcels!=="undefined";
   const collection=snapshot?.data || {type:"FeatureCollection",features:pilot ? gopaliLiveParcels.map(([gata_no,ring])=>({
@@ -571,6 +613,36 @@
   }
   el("draftMap").download=`gopali-${snapshot?.as_of || "2026-11-24"}-${reviewMode ? "preview" : "lookup"}.geojson`;
   el("draftMap").href=URL.createObjectURL(new Blob([JSON.stringify(collection)],{type:"application/geo+json"}));
+  // workspace-only
+  function sheetLookup(p,accuracy) {
+    const xy=mapPixel(p); if(!xy) return false;
+    const [x,y]=xy, hits=[];
+    // Two source pixels for tracing/line thickness, plus device uncertainty.
+    const margin=2+Math.max(0,accuracy)/3.69;
+    for(const [number,ring] of sheetParcels) {
+      for(let i=1;i<ring.length;i++) {
+        const [a,b]=ring[i-1],[c,d]=ring[i], dx=c-a,dy=d-b;
+        const t=Math.max(0,Math.min(1,((x-a)*dx+(y-b)*dy)/(dx*dx+dy*dy)));
+        if(Math.hypot(x-a-t*dx,y-b-t*dy)<=margin) {
+          say("Plot unclear: near a traced map boundary. Use a reading farther inside the field."); return true;
+        }
+      }
+      if(ringHit(ring,x,y)===1) hits.push(number);
+    }
+    if(!hits.length) {
+      if(typeof gopaliSheetCandidates!=="undefined" && gopaliSheetCandidates.some(([number,ring])=>
+          number===null && ringHit(ring,x,y)!==0)){
+        say("Plot unclear: a draft outline was detected here, but its gata number has not been confirmed.");
+        return true;
+      }
+      return false;
+    }
+    say(hits.length===1 ? `Map-indicated plot number: ${hits[0]} (approximate screenshot trace; not independently verified).` :
+      "Plot unclear: overlapping map outlines.",hits.length===1 ? hits[0] : null);
+    return true;
+  }
+  el("legacy").onclick=()=>{startLookup();const p=coordinates();if(p && inVillage(p) && !sheetLookup(p,0)) say("Plot unclear: no earlier screenshot trace here.");};
+  // /workspace-only
   function offlineLookup(p,accuracy=0) {
     previewPosition(p);
     if (parcels.length) { locate(p,accuracy||undefined); return; }
@@ -648,7 +720,6 @@
     clearTimeout(gpsSession.timer);
     hidePin();
     el("gpsFix").hidden=true; el("gpsFix").textContent="";
-    el("accuracy").textContent="";
     el("lat").value=el("lon").value="";
   }
   function stopGps(message) {
@@ -725,7 +796,6 @@
       el("lat").value=lat; el("lon").value=lon;
       el("gpsFix").textContent=`Latitude ${lat.toFixed(7)}, longitude ${lon.toFixed(7)} | Accuracy: about ${Math.ceil(accuracy)} m | Device reading: ${new Date(timestamp).toLocaleTimeString()} | Coordinates since: ${new Date(session.since).toLocaleTimeString()}`;
       el("gpsFix").hidden=false;
-      el("accuracy").textContent=`GPS accuracy: about ${Math.ceil(accuracy)} m`;
       if (points.length===3 && !parcels.length) locate({lat,lon},accuracy);
       else offlineLookup({lat,lon},accuracy);
       session.timer=setTimeout(()=>{
