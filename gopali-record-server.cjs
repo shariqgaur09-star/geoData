@@ -1,6 +1,7 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const {setTimeout:delay} = require("node:timers/promises");
 const {createDailyLookup} = require("./gopali-record-cache.cjs");
 
 const service = "https://upbhunaksha.gov.in/bhunakshaserver/MapInfo/getPlotInfo";
@@ -53,15 +54,28 @@ async function readText(stream,limit,tooLarge) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function getRecord(plotNo,signal,fetchPlot) {
+function retryDelay(header) {
+  if (header===null) return 750;
+  return /^\d+$/.test(header) ? Number(header)*1000 : Math.max(0,Date.parse(header)-Date.now());
+}
+
+async function getRecord(plotNo,signal,fetchPlot,reserveRetry) {
   try {
-    const source=await fetchPlot(service,{method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({gisCode:"13200704110216",plotNo}), redirect:"error", signal});
-    if (!source.ok) {
+    for (let attempt=1;;attempt++) {
+      const source=await fetchPlot(service,{method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({gisCode:"13200704110216",plotNo}), redirect:"error", signal});
+      if (source.ok) return parsePlotInfo(await readText(source.body,1024*1024,
+        new RecordError(502,"Source record exceeds the display limit.")),plotNo);
       await source.body?.cancel();
+      if (attempt===1 && source.status===503) {
+        const wait=retryDelay(source.headers.get("retry-after"));
+        if (wait<=2000) {
+          await delay(wait,undefined,{signal});
+          if (reserveRetry()) continue;
+        }
+      }
       throw new RecordError(503,`UP BhuNaksha returned HTTP ${source.status}; no live record is available.`);
     }
-    return parsePlotInfo(await readText(source.body,1024*1024,new RecordError(502,"Source record exceeds the display limit.")),plotNo);
   } catch (err) {
     if (signal.aborted) throw new RecordError(504,"The request to UP BhuNaksha timed out.");
     if (err instanceof RecordError) throw err;
@@ -116,6 +130,12 @@ async function getIprRecord(plotNo,signal,fetchPlot,key) {
 function createPortalServer(fetchPlot=fetch,iprKey=process.env.IPR_API_KEY?.trim(),clock=Date.now) {
   let starts=[], iprStarts=[], active=0;
   const lookup=createDailyLookup(clock), paidAttempts=createDailyLookup(clock);
+  function reserveStart() {
+    const now=clock();
+    starts=starts.filter(t=>now-t<60000);
+    if (starts.length>=30) return false;
+    starts.push(now); return true;
+  }
   async function fallback(plotNo) {
     const {data}=await paidAttempts(plotNo,async ()=>{
       const now=clock();
@@ -148,12 +168,10 @@ function createPortalServer(fetchPlot=fetch,iprKey=process.env.IPR_API_KEY?.trim
         if (typeof plotNo!=="string" || plotNo!==plotNo.trim() || !/^\p{Nd}[\p{Nd}\p{L}\p{M} ./()-]{0,47}$/u.test(plotNo) ||
             Object.keys(input).length!==1) throw new RecordError(400,"Supply only one gata number, for example 373 or 0012/क.");
         async function load() {
-          const now=clock();
-          starts=starts.filter(t=>now-t<60000);
-          if (starts.length>=30 || active>=4) throw new RecordError(429,"Too many record requests. Please retry later.");
-          starts.push(now); active++;
+          if (active>=4 || !reserveStart()) throw new RecordError(429,"Too many record requests. Please retry later.");
+          active++;
           try {
-            return await getRecord(plotNo,AbortSignal.timeout(10000),fetchPlot);
+            return await getRecord(plotNo,AbortSignal.timeout(10000),fetchPlot,reserveStart);
           } catch (err) {
             if (!iprKey || !(err instanceof RecordError)) throw err;
             return await fallback(plotNo);
