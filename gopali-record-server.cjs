@@ -83,11 +83,12 @@ async function getRecord(plotNo,signal,fetchPlot,reserveRetry) {
   }
 }
 
-async function getIprRecord(plotNo,signal,fetchPlot,key) {
+async function getIprRecord(plotNo,signal,fetchPlot,key,requireReader) {
   const malformed=()=>new RecordError(502,"India Property Register returned an unreadable or mismatched record.");
   async function get(resource) {
     try {
       signal.throwIfAborted();
+      requireReader();
       const r=await fetchPlot(`https://indiapropertyregister.com/api/v1/${resource}`,{
         method:"GET",headers:{Accept:"application/json",Authorization:`Bearer ${key}`},redirect:"error",signal
       });
@@ -130,6 +131,11 @@ async function getIprRecord(plotNo,signal,fetchPlot,key) {
 function createPortalServer(fetchPlot=fetch,iprKey=process.env.IPR_API_KEY?.trim(),clock=Date.now) {
   let starts=[], iprStarts=[], active=0;
   const lookup=createDailyLookup(clock), paidAttempts=createDailyLookup(clock);
+  const readers=new Map();
+  function requireReader(plotNo) {
+    if (![...(readers.get(plotNo) ?? [])].some(res=>!res.destroyed && !res.socket?.destroyed))
+      throw new RecordError(409,"Plot request no longer active; paid lookup stopped.");
+  }
   function reserveStart() {
     const now=clock();
     starts=starts.filter(t=>now-t<60000);
@@ -138,11 +144,12 @@ function createPortalServer(fetchPlot=fetch,iprKey=process.env.IPR_API_KEY?.trim
   }
   async function fallback(plotNo) {
     const {data}=await paidAttempts(plotNo,async ()=>{
+      requireReader(plotNo);
       const now=clock();
       iprStarts=iprStarts.filter(t=>now-t<3600000);
       if (iprStarts.length>=5) throw new RecordError(429,"BhuNaksha unavailable; the demo's hourly IPR allowance is used up.");
       iprStarts.push(now);
-      try { return {record:await getIprRecord(plotNo,AbortSignal.timeout(16000),fetchPlot,iprKey)}; }
+      try { return {record:await getIprRecord(plotNo,AbortSignal.timeout(16000),fetchPlot,iprKey,()=>requireReader(plotNo))}; }
       catch (err) {
         // Even a failed detail read may follow a billed plot-ID search. Reserve the attempt for today.
         return {error:err instanceof RecordError ? err : new RecordError(502,"Unreadable India Property Register response.")};
@@ -173,11 +180,21 @@ function createPortalServer(fetchPlot=fetch,iprKey=process.env.IPR_API_KEY?.trim
           try {
             return await getRecord(plotNo,AbortSignal.timeout(10000),fetchPlot,reserveStart);
           } catch (err) {
-            if (!iprKey || !(err instanceof RecordError)) throw err;
+            if (!(err instanceof RecordError)) throw err;
+            if (!iprKey) throw new RecordError(err.status,`${err.message} IPR fallback is not configured on this server.`);
             return await fallback(plotNo);
           } finally { active--; }
         }
-        const result=await lookup(plotNo,load);
+        const group=readers.get(plotNo) ?? new Set();
+        readers.set(plotNo,group); group.add(res);
+        function release() {
+          group.delete(res);
+          if (!group.size && readers.get(plotNo)===group) readers.delete(plotNo);
+        }
+        res.once("close",release);
+        let result;
+        try { result=await lookup(plotNo,load); }
+        finally { res.off("close",release); release(); }
         if (res.destroyed) return;
         res.setHeader("X-Record-Cache",result.cache);
         res.setHeader("X-Record-Fetched-At",result.fetchedAt);

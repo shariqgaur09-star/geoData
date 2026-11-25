@@ -62,6 +62,7 @@
       </fieldset>
     </form>
     <p id="status" role="status"></p>
+    <p id="khasraResult" aria-live="polite" hidden><strong id="khasraLabel"></strong> <span id="khasraNumbers"></span></p>
     <section id="landRecord" aria-labelledby="recordHeading" hidden>
       <h2 id="recordHeading">Gata / khasra <span id="recordGata"></span></h2>
       <p id="rorStatus" aria-live="polite"></p>
@@ -99,9 +100,10 @@
       <svg id="mapView" role="img" aria-label="GPS position on the georeferenced Gopali map">
         <image id="mapRaster" href="gopali-registered-preview.png" width="13120" height="9960"/>
         <path id="plotOutline" fill="#16813c" fill-rule="evenodd" fill-opacity=".2" stroke="#116333" stroke-width="2" vector-effect="non-scaling-stroke"/>
+        <circle id="gpsRadius" r="0" fill="#165ac2" fill-opacity=".09" stroke="#165ac2" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>
         <circle id="mapPin" r="8" fill="#165ac2" stroke="white" stroke-width="2"/>
       </svg>
-      <figcaption id="mapLegend">Blue: location · Green: draft plot boundary</figcaption>
+      <figcaption id="mapLegend">Blue: location and device accuracy · Green: single draft plot · Amber: possible plots</figcaption>
     </figure>
     <details id="moreOptions"><summary>More options</summary>
     <p id="gpsHint" role="status" hidden></p>
@@ -270,6 +272,7 @@
     el("recordCopy").hidden=true; el("recordFile").value=""; el("recordNotice").textContent="";
   }
   function selectRecordPlot(number) {
+    if (number===null) el("khasraResult").hidden=true;
     if (recordPlot===number) return;
     clearLiveRecord();
     discardRecordPdf();
@@ -283,8 +286,12 @@
       else el("rorStatus").textContent=recordEndpoint ? "Automatic fetching is off." : "Offline copy: no live record requested.";
     }
   }
-  const say = (message,number=null) => {
-    selectRecordPlot(number);
+  const say = (message,number=null,{candidates=[],mapped=number}={}) => {
+    const ambiguous=candidates.length>0;
+    selectRecordPlot(ambiguous ? null : number);
+    el("khasraLabel").textContent=ambiguous ? "Possible mapped khasra numbers:" : "Identified khasra number:";
+    el("khasraNumbers").textContent=ambiguous ? candidates.join(", ") : mapped ?? "";
+    el("khasraResult").hidden=!ambiguous && mapped===null;
     el("manual").hidden=true; el("status").textContent=message;
   };
   el("autoRecords").onchange=()=>{
@@ -454,11 +461,12 @@
   function locate({lat,lon}, accuracy) {
     if (!inVillage({lat,lon},accuracy)) return;
     if (parcels.length) {
-      const {hits,boundary,rings,draft}=parcelHit(parcels,{lat,lon},accuracy);
+      const result=parcelHit(parcels,{lat,lon},accuracy);
+      const {hits,boundary,rings,draft}=result;
+      if (boundary || hits.size>1) { possiblePlots({lat,lon},accuracy,[result]); return; }
       const n=!boundary && hits.size===1 ? [...hits][0] : null;
-      previewPosition({lat,lon},!boundary && hits.size===1 ? rings : []);
+      previewPosition({lat,lon},n!==null ? rings : [],accuracy);
       say((!hits.size ? "Plot unclear: this point has no matching parcel in the uploaded map. Check the coordinates and map coverage." :
-           boundary || hits.size>1 ? `Plot unclear: boundary or overlap. Possible plot numbers: ${[...hits].join(", ")}. Enter a GPS point farther inside the intended field.` :
            `${draft ? "Map-indicated plot number" : "Plot number"}: ${[...hits][0]}`) +
           (Number.isFinite(accuracy) ? ` Device accuracy: about ${Math.round(accuracy)} m; nearby plots may differ.` : ""),
           n!==null && !parcels.some(e=>e.number===n && e.villageCode!=="110216") ? n : null);
@@ -504,11 +512,15 @@
     const {x,y}=projectGopali(lat,lon);
     return [(x-184840)*4,(3284214-y)*4];
   }
-  function previewPosition(p,rings=[]) {
+  function previewPosition(p,rings=[],accuracy=0,possible=false) {
     const [x,y]=registeredPixel(p.lat,p.lon);
     if (!(x>=0 && x<13120 && y>=0 && y<9960)) return false;
     const outline=rings.map(ring=>ring.map(([lon,lat])=>registeredPixel(lat,lon)));
-    const halfHeight=outline.flat().reduce((s,[a,b])=>Math.max(s,.6*Math.abs(a-x),1.2*Math.abs(b-y)),220);
+    const halfHeight=outline.flat().reduce((s,[a,b])=>Math.max(s,.6*Math.abs(a-x),1.2*Math.abs(b-y)),Math.max(220,accuracy*4.8));
+    el("gpsRadius").setAttribute("cx",x); el("gpsRadius").setAttribute("cy",y);
+    el("gpsRadius").setAttribute("r",accuracy*4);
+    el("plotOutline").setAttribute("stroke",possible?"#b45309":"#116333");
+    el("plotOutline").setAttribute("fill",possible?"none":"#16813c");
     el("mapView").setAttribute("viewBox",`${x-2*halfHeight} ${y-halfHeight} ${4*halfHeight} ${2*halfHeight}`);
     el("plotOutline").setAttribute("d",outline.map(r=>"M"+r.map(v=>v.join(",")).join("L")+"Z").join(" "));
     el("mapPin").setAttribute("cx",x);
@@ -538,6 +550,7 @@
   }
   function parcelHit(entries,{lat,lon},accuracy=0) {
     const hits=new Set(), east=Math.max(1,111320*Math.cos(lat*Math.PI/180));
+    const matchedParts=[];
     let boundary=false, rings=[], draft=false;
     for(const entry of entries) {
       const margin=Math.max(0,accuracy)+entry.margin;
@@ -550,17 +563,64 @@
         const holes=part.rings.slice(1).map(r=>ringHit(r,lon,lat,margin));
         if(holes.includes(1)) continue;
         boundary ||= outer===2 || holes.includes(2);
+        matchedParts.push(part.rings);
         hits.add(entry.number); rings=part.rings; draft=entry.draft;
       }
     }
-    return {hits,boundary,rings,draft};
+    return {hits,boundary,rings,draft,matchedParts};
+  }
+  function possiblePlots(p,accuracy=0,results) {
+    const ids=[...new Set(results.flatMap(result=>[...result.hits]))].sort((a,b)=>a.localeCompare(b,"en",{numeric:true}));
+    if (ids.length>12) {
+      previewPosition(p,[],accuracy);
+      say("Plot unclear: too many mapped plots to outline. Wait for a more precise fix.",null,{candidates:ids}); return;
+    }
+    previewPosition(p,results.flatMap(result=>result.matchedParts.flat()),accuracy,true);
+    say(`Plot unclear: boundary or map overlap. Possible mapped gatas: ${ids.join(", ")}. Amber outlines are candidates, not a confirmed number.`+
+      (accuracy>0 ? ` Blue dashed circle: device uncertainty, about ${Math.ceil(accuracy)} m.` : ""),null,{candidates:ids});
   }
   const registered=collection.features.map(({geometry,properties})=>searchableParcel(
     properties.gata_no,geometry.type==="Polygon" ? [geometry.coordinates] : geometry.coordinates,
     properties.edge_margin_m,properties.status!=="provider parcel"));
+  const publicBeta=true;
+  let gapTrial=publicBeta, reviewLayer=globalThis.gopaliBeta;
+  const trialReady=gapTrial && pilot && reviewLayer?.review===true && reviewLayer.village_code==="110216" &&
+    reviewLayer.as_of==="2026-11-24" && reviewLayer.data?.features?.length>0;
+  const reviewEntries=trialReady ? reviewLayer.data.features.map(({geometry,properties})=>searchableParcel(
+    properties.gata_no,geometry.type==="Polygon" ? [geometry.coordinates] : geometry.coordinates,
+    properties.edge_margin_m,true)) : [];
+  const selectedNumbers=new Set(trialReady ? reviewLayer.data.features.filter(f=>f.properties.status==="selected-map draft")
+    .map(f=>f.properties.gata_no) : []);
+  const pilotNumbers=new Set(gapTrial ? registered.map(p=>p.number) : []);
+  const disputed=new Set(["1244","1248","1280"]);
+  if (gapTrial) {
+    el("recordSetup").hidden=false;
+    el("recordSetup").textContent=recordEndpoint ? `${publicBeta ? "Public GPS beta" : "Local GPS trial"} · Records only for a single identified khasra` :
+      "Offline GPS trial · Live land records unavailable";
+  }
+  function trialLookup(p,accuracy) {
+    if (!trialReady) { say("Plot unclear: matching pilot and review layers are required for this trial."); return; }
+    if (!inVillage(p,accuracy)) return;
+    const a=parcelHit(registered,p,accuracy), b=parcelHit(reviewEntries,p,accuracy);
+    const ids=new Set([...a.hits,...b.hits]);
+    const checkedDispute=verifiedMap.features.some(f=>f.properties.kind==="verified_point" &&
+      disputed.has(f.properties.gata_no) && f.geometry.coordinates[0]===p.lon && f.geometry.coordinates[1]===p.lat);
+    if (checkedDispute || [...ids].some(id=>disputed.has(id))) {
+      say("Plot unclear: disputed map numbering here. Check an official parcel boundary."); return;
+    }
+    if (a.boundary || b.boundary || ids.size>1) { possiblePlots(p,accuracy,[a,b]); return; }
+    const [id]=ids;
+    if (id && b.hits.has(id) && (a.hits.has(id) || (!pilotNumbers.has(id) && selectedNumbers.has(id)))) {
+      const origin=a.hits.has(id) ? "pilot" : "additional BhuNaksha review";
+      previewPosition(p,a.hits.has(id) ? a.rings : b.rings,accuracy);
+      say(`Draft gata: ${id} (${origin} boundary; not field-verified).`,id); return;
+    }
+    say("Location found. No agreed numbered boundary here in this lookup.");
+  }
   el("datasetLabel").textContent=snapshot ? `${snapshot.review ? "Review preview — not published" : "Published lookup"} (${snapshot.as_of})` :
     pilot ? "Bundled draft (2026-11-24)" : "Lookup layer unavailable";
-  el("live-count").textContent=registered.length.toLocaleString();
+  if (publicBeta) el("datasetLabel").textContent="Public beta · draft map (2026-11-24)";
+  el("live-count").textContent=(publicBeta ? reviewEntries.length : registered.length).toLocaleString();
   el("expectedCount").textContent=(snapshot?.expected ?? 1627).toLocaleString();
   if (snapshot && snapshot.as_of!=="2026-11-24") el("mapLegend").textContent="Background image: 2026-11-24. Green outline: selected lookup version; blue dot: GPS.";
   if (reviewMode || globalThis.gopaliPreview) {
@@ -569,15 +629,20 @@
     a.textContent=reviewMode ? "Return to active lookup" : "Test the latest unpublished preview";
   }
   el("draftMap").download=`gopali-${snapshot?.as_of || "2026-11-24"}-${reviewMode ? "preview" : "lookup"}.geojson`;
-  el("draftMap").href=URL.createObjectURL(new Blob([JSON.stringify(collection)],{type:"application/geo+json"}));
+  el("draftMap").href=URL.createObjectURL(new Blob([JSON.stringify(publicBeta ? reviewLayer?.data : collection)],{type:"application/geo+json"}));
   function offlineLookup(p,accuracy=0) {
     previewPosition(p);
+    if (gapTrial) { trialLookup(p,accuracy); return; }
     if (parcels.length) { locate(p,accuracy||undefined); return; }
-    const {hits,boundary,rings,draft}=parcelHit(registered,p,accuracy);
-    if(boundary) { say("Plot unclear: on or within GPS accuracy of a mapped plot boundary."); return; }
+    const result=parcelHit(registered,p,accuracy);
+    const {hits,boundary,rings,draft}=result;
+    if(boundary || hits.size>1) {
+      if (!inVillage(p,accuracy)) return;
+      possiblePlots(p,accuracy,[result]); return;
+    }
     if(hits.size) {
       const n=hits.size===1 ? [...hits][0] : null;
-      if(n!==null) previewPosition(p,rings);
+      if(n!==null) previewPosition(p,rings,accuracy);
       say(n!==null ? `${draft ? "Map-indicated plot number" : "Plot number"}: ${n}${draft ? " (draft boundary)." : "."}` :
         "Plot unclear: overlapping mapped boundaries.",n); return;
     }
